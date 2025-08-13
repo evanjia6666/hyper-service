@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebSocket Test Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        #events {
+            border: 1px solid #ccc;
+            height: 400px;
+            overflow-y: scroll;
+            padding: 10px;
+            background-color: #f9f9f9;
+            font-family: monospace;
+        }
+        .event {
+            border-bottom: 1px solid #eee;
+            padding: 5px 0;
+        }
+        .controls {
+            margin: 10px 0;
+        }
+        input, button {
+            margin: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>WebSocket Test Client</h1>
+    <div class="controls">
+        <button id="connect">Connect</button>
+        <button id="disconnect">Disconnect</button>
+        <span id="status">Disconnected</span>
+    </div>
+    
+    <div class="controls">
+        <button id="subscribe">Subscribe to Trade Events</button>
+        <button id="unsubscribe">Unsubscribe from Trade Events</button>
+    </div>
+    
+    <div id="events"></div>
+
+    <script>
+        let ws = null;
+        
+        document.getElementById('connect').addEventListener('click', () => {
+            if (ws) {
+                ws.close();
+            }
+            
+            ws = new WebSocket('ws://localhost:8080/ws');
+            
+            ws.onopen = () => {
+                document.getElementById('status').textContent = 'Connected';
+                console.log('Connected to WebSocket server');
+            };
+            
+            ws.onmessage = (event) => {
+                const eventsDiv = document.getElementById('events');
+                const eventDiv = document.createElement('div');
+                eventDiv.className = 'event';
+                eventDiv.textContent = event.data;
+                eventsDiv.prepend(eventDiv);
+            };
+            
+            ws.onclose = () => {
+                document.getElementById('status').textContent = 'Disconnected';
+                console.log('Disconnected from WebSocket server');
+            };
+            
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+        });
+        
+        document.getElementById('disconnect').addEventListener('click', () => {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        });
+        
+        document.getElementById('subscribe').addEventListener('click', () => {
+            if (!ws) {
+                alert('Not connected to WebSocket server');
+                return;
+            }
+            
+            const subscriptionMsg = {
+                action: 'subscribe',
+                event: 'fill'
+            };
+            
+            ws.send(JSON.stringify(subscriptionMsg));
+            console.log('Sent subscription message:', subscriptionMsg);
+        });
+        
+        document.getElementById('unsubscribe').addEventListener('click', () => {
+            if (!ws) {
+                alert('Not connected to WebSocket server');
+                return;
+            }
+            
+            const subscriptionMsg = {
+                action: 'unsubscribe',
+                event: 'fill'
+            };
+            
+            ws.send(JSON.stringify(subscriptionMsg));
+            console.log('Sent unsubscription message:', subscriptionMsg);
+        });
+    </script>
+</body>
+</html>
