@@ -71,16 +71,16 @@ type Service struct {
 	clients       map[*websocket.Conn]map[string]bool // conn -> event type -> subscribed
 	clientsMux    sync.RWMutex
 	quit          chan struct{}
-	fileTails     map[string]*tailFile // filename -> tailFile
-	currentFiles  map[string]struct{}
-	fileTailsMux  sync.RWMutex
+	//fileTails     map[string]*tailFile // filename -> tailFile
+	currentFiles map[string]struct{}
+	//fileTailsMux  sync.RWMutex
 }
 
 // tailFile represents a tailed file with its position
-type tailFile struct {
-	filename string
-	position int64
-}
+// type tailFile struct {
+// 	filename string
+// 	position int64
+// }
 
 // NewService creates a new service instance
 func NewService(dataDir, whitelistFile, port string) (*Service, error) {
@@ -96,9 +96,9 @@ func NewService(dataDir, whitelistFile, port string) (*Service, error) {
 		watcher:       watcher,
 		whitelist:     make(map[string]bool),
 		clients:       make(map[*websocket.Conn]map[string]bool),
-		fileTails:     make(map[string]*tailFile),
-		quit:          make(chan struct{}),
-		currentFiles:  make(map[string]struct{}),
+		//fileTails:     make(map[string]*tailFile),
+		quit:         make(chan struct{}),
+		currentFiles: make(map[string]struct{}),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true // Allow connections from any origin for testing
@@ -107,20 +107,26 @@ func NewService(dataDir, whitelistFile, port string) (*Service, error) {
 	}
 
 	for _, t := range []string{watchFills} {
-		fPath := svc.currentFile(t)
+		gPath, pPath, fPath := svc.currentDirFile(t)
 		// 获取目录地址
-		dir := filepath.Dir(fPath)
+
 		// 如果目录不存在，创建目录
-		if _, err := os.Stat(dir); os.IsNotExist(err) {
-			err = os.MkdirAll(dir, 0755)
+		if _, err := os.Stat(pPath); os.IsNotExist(err) {
+			err = os.MkdirAll(pPath, 0755)
 			if err != nil {
-				return nil, fmt.Errorf("failed to create directory %s: %w", dir, err)
+				return nil, fmt.Errorf("failed to create directory %s: %w", pPath, err)
 			}
 		}
 		// watch 当前目录
-		err := svc.watcher.Add(dir)
+		err := svc.watcher.Add(pPath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to watch directory %s: %w", dir, err)
+			return nil, fmt.Errorf("failed to watch directory %s: %w", pPath, err)
+		}
+
+		// wath 父目录
+		err = svc.watcher.Add(gPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to watch directory %s: %w", gPath, err)
 		}
 		svc.currentFiles[fPath] = struct{}{}
 	}
@@ -147,33 +153,12 @@ func (s *Service) Start() error {
 	go s.watchWhitelist()
 
 	// Watch the current hour file
-	now := time.Now()
+	// 转为 GMT 时间
+	now := time.Now().UTC()
 	hourFile := filepath.Join(s.dataDir, "node_fills_by_block", "hourly",
 		now.Format("20060102"), fmt.Sprintf("%d", now.Hour()))
 
 	log.Printf("Watching file: %s", hourFile)
-
-	// Create directory if it doesn't exist
-	// dir := filepath.Dir(hourFile)
-	// if _, err := os.Stat(dir); os.IsNotExist(err) {
-	// 	err = os.MkdirAll(dir, 0755)
-	// 	if err != nil {
-	// 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
-	// 	}
-	// }
-
-	// Watch the file (create if it doesn't exist)
-	// if _, err := os.Stat(hourFile); os.IsNotExist(err) {
-	// 	_, err = os.Create(hourFile)
-	// 	if err != nil {
-	// 		return fmt.Errorf("failed to create file %s: %w", hourFile, err)
-	// 	}
-	// }
-
-	// err := s.watcher.Add(dir)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to watch directory %s: %w", dir, err)
-	// }
 
 	// Watch the whitelist file
 	err := s.watcher.Add(s.whitelistFile)
@@ -256,13 +241,24 @@ func (s *Service) watchFiles() {
 		case event := <-s.watcher.Events:
 			if event.Op&fsnotify.Create != 0 {
 				log.Printf("File created: %s", event.Name)
+				// 如果是目录，则添加到 watcher
+				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+					err = s.watcher.Add(event.Name)
+					if err != nil {
+						log.Printf("Error adding directory to watcher: %v, dir: %s", err, event.Name)
+						continue
+					}
+					log.Printf("Watching directory: %s", event.Name)
+					continue
+				}
+
 				// 监听到有新的文件创建，检查是否是关注的几个类型， 如果是，启动对新的文件的监听
 				switch {
 				case strings.Contains(event.Name, watchFills):
 					s.currentFiles[event.Name] = struct{}{}
 					go s.processFillsFile(event.Name, false)
 				case strings.Contains(event.Name, watchTrade):
-					// 这里可以添加对其他类型文件的处理逻辑
+					go s.processFillsFile(event.Name, false)
 				}
 
 			}
@@ -579,16 +575,17 @@ func (s *Service) handleWhitelist(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Service) currentFile(msg string) string {
-	now := time.Now()
-	return filepath.Join(s.dataDir, msg, "hourly",
-		now.Format("20060102"), fmt.Sprintf("%d", now.Hour()))
+func (s *Service) currentDirFile(msg string) (string, string, string) {
+	now := time.Now().UTC()
+	// return filepath.Join(s.dataDir, msg, "hourly",
+	// 	now.Format("20060102"), fmt.Sprintf("%d", now.Hour()))
+	return filepath.Join(s.dataDir, msg, "hourly"), filepath.Join(s.dataDir, msg, "hourly", now.Format("20060102")), filepath.Join(s.dataDir, msg, "hourly", now.Format("20060102"), fmt.Sprintf("%d", now.Hour()))
 }
 
 func isCurrentHourFile(path string) bool {
 	// 判断给定的路径是否是当前小时的文件
 	base := filepath.Base(path)
-	now := time.Now()
+	now := time.Now().UTC()
 	return strconv.Itoa(now.Hour()) == base
 }
 

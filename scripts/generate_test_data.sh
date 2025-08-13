@@ -16,8 +16,8 @@ fi
 
 # Function to generate filename based on current time
 generate_filename() {
-    local date=$(date +%Y%m%d)
-    local hour=$(date +%H | sed 's/^0*//')  # Remove leading zeros
+    local date=$(date -u +%Y%m%d)
+    local hour=$(date -u +%H | sed 's/^0*//')  # Remove leading zeros
     echo "${DATA_DIR}/node_fills_by_block/hourly/${date}/${hour}"
 }
 
