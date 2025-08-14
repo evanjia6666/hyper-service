@@ -356,37 +356,37 @@ func (s *Service) processFillsFile(filename string, isFirst bool) {
 			}
 
 			// Check if user is in whitelist
-			s.whitelistMux.RLock()
-			_, whitelisted := s.whitelist[user]
-			s.whitelistMux.RUnlock()
+			// s.whitelistMux.RLock()
+			// _, whitelisted := s.whitelist[user]
+			// s.whitelistMux.RUnlock()
 
-			if whitelisted {
-				// Convert to our Event struct
-				ev := Event{
-					User:  user,
-					Event: EventFill,
-					Data:  eventData,
-					// Coin:          getString(eventData, "coin"),
-					// Price:         getString(eventData, "px"),
-					// Size:          getString(eventData, "sz"),
-					// Side:          getString(eventData, "side"),
-					// Time:          getInt64(eventData, "time"),
-					// StartPosition: getString(eventData, "startPosition"),
-					// Direction:     getString(eventData, "dir"),
-					// ClosedPnl:     getString(eventData, "closedPnl"),
-					// Hash:          getString(eventData, "hash"),
-					// OrderID:       getInt64(eventData, "oid"),
-					// Crossed:       getBool(eventData, "crossed"),
-					// Fee:           getString(eventData, "fee"),
-					// TradeID:       getInt64(eventData, "tid"),
-					// ClientOrderID: getString(eventData, "cloid"),
-					// FeeToken:      getString(eventData, "feeToken"),
-					// TwapID:        getStringPtr(eventData, "twapId"),
-				}
-
-				// Send to WebSocket clients who are subscribed to this user
-				s.broadcastEventToSubscribers(ev, EventFill)
+			//if whitelisted {
+			// Convert to our Event struct
+			ev := Event{
+				User:  user,
+				Event: EventFill,
+				Data:  eventData,
+				// Coin:          getString(eventData, "coin"),
+				// Price:         getString(eventData, "px"),
+				// Size:          getString(eventData, "sz"),
+				// Side:          getString(eventData, "side"),
+				// Time:          getInt64(eventData, "time"),
+				// StartPosition: getString(eventData, "startPosition"),
+				// Direction:     getString(eventData, "dir"),
+				// ClosedPnl:     getString(eventData, "closedPnl"),
+				// Hash:          getString(eventData, "hash"),
+				// OrderID:       getInt64(eventData, "oid"),
+				// Crossed:       getBool(eventData, "crossed"),
+				// Fee:           getString(eventData, "fee"),
+				// TradeID:       getInt64(eventData, "tid"),
+				// ClientOrderID: getString(eventData, "cloid"),
+				// FeeToken:      getString(eventData, "feeToken"),
+				// TwapID:        getStringPtr(eventData, "twapId"),
 			}
+
+			// Send to WebSocket clients who are subscribed to this user
+			s.broadcastEventToSubscribers(ev, EventFill)
+			//	}
 		}
 	}
 
