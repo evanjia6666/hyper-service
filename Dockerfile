@@ -32,5 +32,8 @@ COPY --from=builder /app/scripts ./scripts
 # Expose port
 EXPOSE 8000
 
-# Command to run the executable
-CMD ["./hyper-service", "-data_dir=/app/test", "-whitelist=/app/configs/whitelist.txt"]
+# Use ENTRYPOINT to define the executable
+ENTRYPOINT ["./hyper-service"]
+
+# Use CMD to define default arguments (can be overridden at runtime)
+CMD ["-data_dir=/app/test"]
