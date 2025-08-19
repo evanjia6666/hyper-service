@@ -16,26 +16,30 @@ fi
 
 # Function to generate filename based on current time
 generate_filename() {
+    local eventType=$1
     local date=$(date -u +%Y%m%d)
     local hour=$(date -u +%H | sed 's/^0*//')  # Remove leading zeros
-    echo "${DATA_DIR}/node_fills_by_block/hourly/${date}/${hour}"
+    echo "${DATA_DIR}/${eventType}/hourly/${date}/${hour}"
 }
 
 # Create the initial directory structure
 mkdir -p "${DATA_DIR}/node_fills_by_block/hourly"
+mkdir -p "${DATA_DIR}/misc_events_by_block/hourly"
 
 echo "Starting test data generation. Press Ctrl+C to stop."
 
 # Generate sample data lines continuously
 counter=0
 while true; do
-    # Generate filename based on current time
-    FILENAME=$(generate_filename)
+    # Generate filenames based on current time
+    FILLS_FILENAME=$(generate_filename "node_fills_by_block")
+    MISC_FILENAME=$(generate_filename "misc_events_by_block")
     
-    # Create directory if it doesn't exist
-    mkdir -p "$(dirname "$FILENAME")"
+    # Create directories if they don't exist
+    mkdir -p "$(dirname "$FILLS_FILENAME")"
+    mkdir -p "$(dirname "$MISC_FILENAME")"
     
-    # Generate random events
+    # Generate random fill events
     EVENTS="["
     for j in {1..3}; do
         # Randomly select a user from our whitelist
@@ -66,10 +70,33 @@ while true; do
     done
     EVENTS+="]"
     
-    # Write a line to the file
-    echo "{\"local_time\":\"$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)\",\"block_time\":\"$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)\",\"block_number\":$((RANDOM * 1000 + RANDOM)),\"events\":${EVENTS}}" >> "${FILENAME}"
+    # Write a fill event line to the file
+    echo "{\"local_time\":\"$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)\",\"block_time\":\"$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)\",\"block_number\":$((RANDOM * 1000 + RANDOM)),\"events\":${EVENTS}}" >> "${FILLS_FILENAME}"
     
-    echo "Added line to ${FILENAME}"
+    echo "Added fill event line to ${FILLS_FILENAME}"
+    
+    # Generate random misc events
+    MISC_EVENTS="["
+    for j in {1..2}; do
+        # Randomly select a user from our whitelist
+        USER=$(shuf -n 1 "$WHITELIST_FILE")
+        
+        # Generate random data
+        TIME=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
+        HASH="0x$(openssl rand -hex 32)"
+        
+        MISC_EVENTS+="{\"time\":\"${TIME}\",\"hash\":\"${HASH}\",\"inner\":{\"LedgerUpdate\":{\"users\":[\"${USER}\",\"$(shuf -n 1 "$WHITELIST_FILE")\"],\"delta\":{\"type\":\"subAccountTransfer\",\"usdc\":\"$(shuf -n 1 -i 1-1000)\",\"user\":\"${USER}\",\"destination\":\"$(shuf -n 1 "$WHITELIST_FILE")\"}}}}"
+        
+        if [ $j -lt 2 ]; then
+            MISC_EVENTS+="," 
+        fi
+    done
+    MISC_EVENTS+="]"
+    
+    # Write a misc event line to the file
+    echo "{\"local_time\":\"$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)\",\"block_time\":\"$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)\",\"block_number\":$((RANDOM * 1000 + RANDOM)),\"events\":${MISC_EVENTS}}" >> "${MISC_FILENAME}"
+    
+    echo "Added misc event line to ${MISC_FILENAME}"
     
     # Increment counter and exit after 50 lines for testing purposes
     counter=$((counter + 1))

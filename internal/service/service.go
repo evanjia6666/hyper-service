@@ -1,12 +1,12 @@
 package service
 
 import (
-	"bufio"
-	"encoding/json"
+	"context"
+	"database/sql"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
+
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,91 +14,141 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bits-and-blooms/bloom/v3"
 	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/websocket"
+	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
+	config "github.com/uxuyprotocol/hyper-service/configs"
+	"github.com/uxuyprotocol/hyper-service/internal/model"
+	wredis "github.com/uxuyprotocol/hyper-service/redis"
 )
 
 const (
-	watchFills = "node_fills_by_block"
-	watchTrade = "node_trades_by_block"
+	WATCH_FILLS = "node_fills_by_block"
+	WATCH_MISC  = "misc_events_by_block"
 )
 
 const (
-	EventTrade = "trade"
-	EventFill  = "fill"
+	EVENT_FILL = "fill"
+	EVENT_MISC = "misc"
 )
 
-// Event represents a single trade event
-type Event struct {
-	User  string                 `json:"user"`
-	Event string                 `json:"event"`
-	Data  map[string]interface{} `json:"data"`
-	// Coin          string  `json:"coin"`
-	// Price         string  `json:"px"`
-	// Size          string  `json:"sz"`
-	// Side          string  `json:"side"`
-	// Time          int64   `json:"time"`
-	// StartPosition string  `json:"startPosition"`
-	// Direction     string  `json:"dir"`
-	// ClosedPnl     string  `json:"closedPnl"`
-	// Hash          string  `json:"hash"`
-	// OrderID       int64   `json:"oid"`
-	// Crossed       bool    `json:"crossed"`
-	// Fee           string  `json:"fee"`
-	// TradeID       int64   `json:"tid"`
-	// ClientOrderID string  `json:"cloid"`
-	// FeeToken      string  `json:"feeToken"`
-	// TwapID        *string `json:"twapId"`
-}
-
-// Data represents the structure of the JSON data file
-type Data struct {
+// FillData represents the structure of the JSON data file
+type FillData struct {
 	LocalTime string          `json:"local_time"`
 	BlockTime string          `json:"block_time"`
 	BlockNum  int64           `json:"block_number"`
 	Events    [][]interface{} `json:"events"`
 }
 
-// Service represents our main service
-type Service struct {
-	dataDir       string
-	whitelistFile string
-	port          string
-	watcher       *fsnotify.Watcher
-	whitelist     map[string]bool
-	whitelistMux  sync.RWMutex
-	upgrader      websocket.Upgrader
-	clients       map[*websocket.Conn]map[string]bool // conn -> event type -> subscribed
-	clientsMux    sync.RWMutex
-	quit          chan struct{}
-	//fileTails     map[string]*tailFile // filename -> tailFile
-	currentFiles map[string]struct{}
-	//fileTailsMux  sync.RWMutex
+type MiscData struct {
+	LocalTime string          `json:"local_time"`
+	BlockTime string          `json:"block_time"`
+	BlockNum  uint64          `json:"block_number"`
+	Events    []MiscEventData `json:"events"`
 }
 
-// tailFile represents a tailed file with its position
-// type tailFile struct {
-// 	filename string
-// 	position int64
-// }
+// MiscEventData represents the structure of misc event data
+type MiscEventData struct {
+	Time  string                 `json:"time"`
+	Hash  string                 `json:"hash"`
+	Inner map[string]interface{} `json:"inner"`
+}
+
+type LedgerUpdate struct {
+	Users []string `json:"users"`
+}
+
+// EventQuery represents the parameters for querying events
+type EventQuery struct {
+	UserAddress string `json:"userAddress"`
+	Event       string `json:"event"`
+	StartBlock  uint64 `json:"startBlock"`
+	EndBlock    uint64 `json:"endBlock"`
+}
+
+// Service represents our main service
+type Service struct {
+	config  *config.Config
+	watcher *fsnotify.Watcher
+
+	upgrader         websocket.Upgrader
+	clients          map[*websocket.Conn]map[string]bool // conn -> event type -> subscribed
+	clientsMux       sync.RWMutex
+	websocketMsgChan chan *EventDetail
+
+	quit chan struct{}
+	//	currentFiles map[string]struct{}
+	db *sql.DB
+
+	redisClient *redis.Client
+
+	bloomFilter    *bloom.BloomFilter
+	bloomFilterMux sync.RWMutex
+	lastScore      string // last score of zset for all addresss
+
+	// filePositions map[string]int64 // filename -> position
+	// filePosMux    sync.RWMutex
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	currentFillFile string
+	fillPosition    uint64
+	currentMiscFile string
+	miscPosition    uint64
+
+	wg sync.WaitGroup
+}
 
 // NewService creates a new service instance
-func NewService(dataDir, whitelistFile, port string) (*Service, error) {
+func NewService(cfg *config.Config) (*Service, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file watcher: %w", err)
 	}
 
+	var db *sql.DB
+
+	aStr := strings.Split(cfg.PostgresAddr, ":")
+	if len(aStr) != 2 {
+		return nil, fmt.Errorf("invalid PostgreSQL address: %s", cfg.PostgresAddr)
+	}
+	// Connect to PostgreSQL
+	db, err = model.NewDB(aStr[0], aStr[1], cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDB)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to PostgreSQL: %w", err)
+	}
+
+	if err := model.InitSchema(db); err != nil {
+		return nil, fmt.Errorf("failed to initialize schema: %w", err)
+	}
+
+	// Connect to Redis
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:     cfg.RedisAddr,
+		Password: cfg.RedisPassword,
+		DB:       cfg.RedisDB,
+	})
+
+	// Create a Bloom filter with configured parameters
+	bf := bloom.NewWithEstimates(cfg.BloomExpectedItems, cfg.BloomFalsePositiveRate)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
 	svc := &Service{
-		dataDir:       dataDir,
-		whitelistFile: whitelistFile,
-		port:          port,
-		watcher:       watcher,
-		whitelist:     make(map[string]bool),
-		clients:       make(map[*websocket.Conn]map[string]bool),
-		//fileTails:     make(map[string]*tailFile),
-		quit:         make(chan struct{}),
-		currentFiles: make(map[string]struct{}),
+		config:           cfg,
+		watcher:          watcher,
+		bloomFilter:      bf,
+		clients:          make(map[*websocket.Conn]map[string]bool),
+		websocketMsgChan: make(chan *EventDetail, 50),
+		quit:             make(chan struct{}),
+		//	currentFiles: make(map[string]struct{}),
+		db:          db,
+		redisClient: redisClient,
+		// filePositions: make(map[string]int64),
+		ctx:    ctx,
+		cancel: cancel,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true // Allow connections from any origin for testing
@@ -106,36 +156,49 @@ func NewService(dataDir, whitelistFile, port string) (*Service, error) {
 		},
 	}
 
-	for _, t := range []string{watchFills} {
-		gPath, pPath, fPath := svc.currentDirFile(t)
-		// 获取目录地址
+	// Initialize bloom filter from Redis
 
-		// 如果目录不存在，创建目录
+	err = svc.initBloomFilterFromRedis()
+	if err != nil {
+		log.Printf("Warning: failed to initialize bloom filter from Redis: %v", err)
+		// Fall back to loading from whitelist file
+		return nil, err
+	}
+
+	// Setup directory watching
+	for _, t := range []string{WATCH_FILLS, WATCH_MISC} {
+		gPath, pPath, fPath := svc.currentDirFile(t)
+
+		// Create directories if they don't exist
 		if _, err := os.Stat(pPath); os.IsNotExist(err) {
 			err = os.MkdirAll(pPath, 0755)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create directory %s: %w", pPath, err)
 			}
 		}
-		// watch 当前目录
+
+		// Watch current directory
 		err := svc.watcher.Add(pPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to watch directory %s: %w", pPath, err)
 		}
 
-		// wath 父目录
+		// Watch parent directory
 		err = svc.watcher.Add(gPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to watch directory %s: %w", gPath, err)
 		}
-		svc.currentFiles[fPath] = struct{}{}
+
+		if t == WATCH_FILLS {
+			svc.currentFillFile = fPath
+			svc.fillPosition = 0
+		} else {
+			svc.currentMiscFile = fPath
+			svc.miscPosition = 0
+		}
 	}
 
-	// Load initial whitelist
-	err = svc.loadWhitelist()
-	if err != nil {
-		return nil, fmt.Errorf("failed to load whitelist: %w", err)
-	}
+	svc.CatchUpEvents()
 
 	return svc, nil
 }
@@ -144,26 +207,35 @@ func NewService(dataDir, whitelistFile, port string) (*Service, error) {
 func (s *Service) Start() error {
 
 	// Start file watcher
+	s.wg.Add(1)
 	go s.watchFiles()
+
+	// Start redis new addresses watcher
+	s.wg.Add(1)
+	go s.watchNewAddress()
+
+	// Start database cleanup task
+	s.wg.Add(1)
+	go s.cleanupOldEvents()
+
+	// Start websocket message writer
+	s.wg.Add(1)
+	go s.WriteWebsocketMsg()
 
 	// Start WebSocket server
 	go s.startWebSocketServer()
 
-	// Start whitelist file watcher
-	go s.watchWhitelist()
+	// Load file positions from Redis (for restart recovery)
+	//go s.loadFilePositions()
 
-	// Watch the current hour file
-	// 转为 GMT 时间
-	now := time.Now().UTC()
-	hourFile := filepath.Join(s.dataDir, "node_fills_by_block", "hourly",
-		now.Format("20060102"), fmt.Sprintf("%d", now.Hour()))
+	for _, eventType := range []string{WATCH_FILLS, WATCH_MISC} {
+		if eventType == WATCH_FILLS {
+			go s.processFillsFile()
+		}
 
-	log.Printf("Watching file: %s", hourFile)
-
-	// Watch the whitelist file
-	err := s.watcher.Add(s.whitelistFile)
-	if err != nil {
-		log.Printf("Warning: failed to watch whitelist file: %v", err)
+		if eventType == WATCH_MISC {
+			go s.processMiscFile()
+		}
 	}
 
 	return nil
@@ -171,52 +243,80 @@ func (s *Service) Start() error {
 
 // Stop stops the service
 func (s *Service) Stop() {
-	close(s.quit)
+	// Close the file watcher
 	s.watcher.Close()
 
-	// Close all WebSocket connections
-	s.clientsMux.Lock()
-	for conn := range s.clients {
-		conn.Close()
-	}
-	s.clientsMux.Unlock()
+	// close
+	close(s.quit)
+
+	time.Sleep(100 * time.Millisecond)
+	// close websocket message channel and conn
+	close(s.websocketMsgChan)
+
+	s.wg.Wait()
+
+	// Save file positions to Redis for restart recovery
+	s.saveFilePositions()
+
+	s.cancel()
+
+	// Close database connection
+	s.db.Close()
+
+	// Close Redis connection
+	s.redisClient.Close()
 }
 
-// loadWhitelist loads the whitelist from file
-func (s *Service) loadWhitelist() error {
-	content, err := os.ReadFile(s.whitelistFile)
+// initBloomFilterFromRedis initializes the Bloom filter from Redis
+func (s *Service) initBloomFilterFromRedis() error {
+	addrs, lastScore, err := wredis.QueryAddressFromZset(s.ctx, s.redisClient, "-inf", "+inf")
+	if err != nil {
+		return err
+	}
+	s.lastScore = lastScore
+
+	for _, addr := range addrs {
+		s.bloomFilter.AddString(addr)
+	}
+	return nil
+}
+
+// loadNewAddress loads the new address from redis into the Bloom filter
+func (s *Service) loadNewAddress() error {
+	end := time.Now().Unix()
+	newAddrs, lastScore, err := wredis.QueryAddressFromZset(s.ctx, s.redisClient, s.lastScore, strconv.FormatInt(end, 10))
 	if err != nil {
 		return err
 	}
 
-	s.whitelistMux.Lock()
-	defer s.whitelistMux.Unlock()
-
-	s.whitelist = make(map[string]bool)
-	for _, line := range strings.Split(string(content), "\n") {
-		user := strings.TrimSpace(line)
-		if user != "" {
-			s.whitelist[user] = true
+	if len(newAddrs) > 0 {
+		s.bloomFilterMux.Lock()
+		for i := range newAddrs {
+			s.bloomFilter.AddString(newAddrs[i])
 		}
+		s.lastScore = lastScore
+		s.bloomFilterMux.Unlock()
 	}
-
-	log.Printf("Loaded %d users from whitelist", len(s.whitelist))
+	log.Printf("Loaded %d users from Redis into Bloom filter", len(newAddrs))
 	return nil
 }
 
-// watchWhitelist watches for changes to the whitelist file
-func (s *Service) watchWhitelist() {
-	ticker := time.NewTicker(30 * time.Second)
+// watchNewAddress watches new addresses in redis zset
+func (s *Service) watchNewAddress() {
+	defer s.wg.Done()
+
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-s.quit:
+			log.Println("Stopping watchNewAddress")
 			return
 		case <-ticker.C:
-			err := s.loadWhitelist()
+			err := s.loadNewAddress()
 			if err != nil {
-				log.Printf("Failed to reload whitelist: %v", err)
+				log.Printf("Failed to reload new address: %v", err)
 			}
 		}
 	}
@@ -224,24 +324,28 @@ func (s *Service) watchWhitelist() {
 
 // watchFiles watches for file changes
 func (s *Service) watchFiles() {
-	err := s.watcher.Add(s.dataDir) // Watch the data directory
+	defer s.wg.Done()
+
+	err := s.watcher.Add(s.config.DataDir) // Watch the data directory
 	if err != nil {
-		log.Printf("Error adding directory to watcher: %v, data dir: %s", err, s.dataDir)
+		log.Printf("Error adding directory to watcher: %v, data dir: %s", err, s.config.DataDir)
 		return
 	}
-	// 初次启动监听需要监听的文件
-	for file := range s.currentFiles {
-		go s.processFillsFile(file, true)
-	}
+
+	// Initially process the current files
+	// for file := range s.currentFiles {
+	// 	go s.processFile(file, true)
+	// }
 
 	for {
 		select {
 		case <-s.quit:
+			log.Println("Stopping file watcher")
 			return
 		case event := <-s.watcher.Events:
 			if event.Op&fsnotify.Create != 0 {
 				log.Printf("File created: %s", event.Name)
-				// 如果是目录，则添加到 watcher
+				// If it's a directory, add it to watcher
 				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
 					err = s.watcher.Add(event.Name)
 					if err != nil {
@@ -252,348 +356,202 @@ func (s *Service) watchFiles() {
 					continue
 				}
 
-				// 监听到有新的文件创建，检查是否是关注的几个类型， 如果是，启动对新的文件的监听
+				// Check if it's a file we're interested in
 				switch {
-				case strings.Contains(event.Name, watchFills):
-					s.currentFiles[event.Name] = struct{}{}
-					go s.processFillsFile(event.Name, false)
-				case strings.Contains(event.Name, watchTrade):
-					go s.processFillsFile(event.Name, false)
+				case strings.Contains(event.Name, WATCH_FILLS):
+					if isCurrentHourFile(event.Name) {
+						s.currentFillFile = event.Name
+						go s.processFillsFile()
+					}
+				case strings.Contains(event.Name, WATCH_MISC):
+					if isCurrentHourFile(event.Name) {
+						s.currentMiscFile = event.Name
+						go s.processMiscFile()
+					}
 				}
-
 			}
 		case err := <-s.watcher.Errors:
-			fmt.Println("fsnotify 错误:", err)
+			log.Printf("fsnotify error: %v", err)
 		}
-	}
-}
-
-// updateWatchedFile updates the watched file based on current time
-// func (s *Service) updateWatchedFile() {
-// 	now := time.Now()
-// 	hourFile := filepath.Join(s.dataDir, "node_fills_by_block", "hourly",
-// 		now.Format("20060102"), fmt.Sprintf("%d", now.Hour()))
-
-// 	// Create file if it doesn't exist
-// 	if _, err := os.Stat(hourFile); err == nil {
-// 		// _, err = os.Create(hourFile)
-// 		// if err != nil {
-// 		// 	log.Printf("Failed to create file %s: %v", hourFile, err)
-// 		// 	return
-// 		// }
-// 		s.fileTailsMux.Lock()
-// 		s.fileTails[hourFile] = &tailFile{
-// 			filename: hourFile,
-// 			position: 0,
-// 		}
-// 		s.fileTailsMux.Unlock()
-// 		log.Printf("Now watching file: %s", hourFile)
-// 	}
-// }
-
-// processFillsFile processes a data file
-func (s *Service) processFillsFile(filename string, isFirst bool) {
-	file, err := os.Open(filename)
-	if err != nil {
-		log.Printf("Failed to open file %s: %v", filename, err)
-		return
-	}
-	defer file.Close()
-
-	// 从文件末尾开始（如果要从头读可以 Seek(0,0)）
-	if stat, err := file.Stat(); err == nil {
-		if isFirst {
-			// 首次启动从末尾开始读
-			file.Seek(stat.Size(), io.SeekStart)
-		} else {
-			// 如果是新文件，则从文件开始读起
-			file.Seek(0, io.SeekStart)
-		}
-	}
-
-	reader := bufio.NewReader(file)
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				// 如果不是今天的文件，EOF 表示可以结束
-				if !isCurrentHourFile(filename) {
-					return
-				}
-				time.Sleep(200 * time.Millisecond)
-				continue
-			}
-			log.Printf("Failed to read line from file %s: %v", filename, err)
-			return
-		}
-
-		if line == "" {
-			continue
-		}
-
-		// Try to parse as JSON
-		var data Data
-		err = json.Unmarshal([]byte(line), &data)
-		if err != nil {
-			log.Printf("Failed to parse JSON line in file %s: %v", filename, err)
-			continue
-		}
-
-		// Process events
-		for _, event := range data.Events {
-			if len(event) < 2 {
-				continue
-			}
-
-			user, ok := event[0].(string)
-			if !ok {
-				continue
-			}
-
-			eventData, ok := event[1].(map[string]interface{})
-			if !ok {
-				continue
-			}
-
-			// Check if user is in whitelist
-			// s.whitelistMux.RLock()
-			// _, whitelisted := s.whitelist[user]
-			// s.whitelistMux.RUnlock()
-
-			//if whitelisted {
-			// Convert to our Event struct
-			ev := Event{
-				User:  user,
-				Event: EventFill,
-				Data:  eventData,
-				// Coin:          getString(eventData, "coin"),
-				// Price:         getString(eventData, "px"),
-				// Size:          getString(eventData, "sz"),
-				// Side:          getString(eventData, "side"),
-				// Time:          getInt64(eventData, "time"),
-				// StartPosition: getString(eventData, "startPosition"),
-				// Direction:     getString(eventData, "dir"),
-				// ClosedPnl:     getString(eventData, "closedPnl"),
-				// Hash:          getString(eventData, "hash"),
-				// OrderID:       getInt64(eventData, "oid"),
-				// Crossed:       getBool(eventData, "crossed"),
-				// Fee:           getString(eventData, "fee"),
-				// TradeID:       getInt64(eventData, "tid"),
-				// ClientOrderID: getString(eventData, "cloid"),
-				// FeeToken:      getString(eventData, "feeToken"),
-				// TwapID:        getStringPtr(eventData, "twapId"),
-			}
-
-			// Send to WebSocket clients who are subscribed to this user
-			s.broadcastEventToSubscribers(ev, EventFill)
-			//	}
-		}
-	}
-
-	// // Update the position
-	// pos, err := file.Seek(0, 1) // Get current position
-	// if err != nil {
-	// 	log.Printf("Failed to get file position for %s: %v", filename, err)
-	// } else {
-	// 	s.fileTailsMux.Lock()
-	// 	tailInfo.position = pos
-	// 	s.fileTailsMux.Unlock()
-	// }
-
-	// if err := scanner.Err(); err != nil {
-	// 	log.Printf("Error reading file %s: %v", filename, err)
-	// }
-}
-
-// Helper functions for extracting data from map[string]interface{}
-func getString(m map[string]interface{}, key string) string {
-	if val, ok := m[key]; ok {
-		if str, ok := val.(string); ok {
-			return str
-		}
-	}
-	return ""
-}
-
-func getInt64(m map[string]interface{}, key string) int64 {
-	if val, ok := m[key]; ok {
-		if f, ok := val.(float64); ok {
-			return int64(f)
-		}
-		if i, ok := val.(int64); ok {
-			return i
-		}
-	}
-	return 0
-}
-
-func getBool(m map[string]interface{}, key string) bool {
-	if val, ok := m[key]; ok {
-		if b, ok := val.(bool); ok {
-			return b
-		}
-	}
-	return false
-}
-
-func getStringPtr(m map[string]interface{}, key string) *string {
-	if val, ok := m[key]; ok {
-		if val == nil {
-			return nil
-		}
-		if str, ok := val.(string); ok {
-			return &str
-		}
-	}
-	return nil
-}
-
-// broadcastEventToSubscribers sends an event to clients subscribed to the user
-func (s *Service) broadcastEventToSubscribers(event Event, eventType string) {
-	s.clientsMux.RLock()
-	defer s.clientsMux.RUnlock()
-
-	for conn, subscriptions := range s.clients {
-		// Check if this client is subscribed to this user
-		if subscribed, exists := subscriptions[eventType]; exists && subscribed {
-			err := conn.WriteJSON(event)
-			if err != nil {
-				log.Printf("Failed to send event to client: %v", err)
-				// Remove the client if there's an error
-				conn.Close()
-				// We can't modify s.clients here because we're holding a read lock
-				// The cleanup will happen in the WebSocket handler
-			}
-		}
-	}
-}
-
-// startWebSocketServer starts the WebSocket server
-func (s *Service) startWebSocketServer() {
-	http.HandleFunc("/ws", s.handleWebSocket)
-	http.HandleFunc("/whitelist", s.handleWhitelist)
-
-	log.Printf("WebSocket server starting on port %s", s.port)
-	err := http.ListenAndServe(":"+s.port, nil)
-	if err != nil {
-		log.Printf("WebSocket server error: %v", err)
 	}
 }
 
 // SubscriptionMessage represents a subscription/unsubscription message
 type SubscriptionMessage struct {
 	Action string `json:"action"` // "subscribe" or "unsubscribe"
-	Event  string `json:"event"`  // event type (e.g., trade, fills)
+	Event  string `json:"event"`  // event type (e.g., fill, misc)
 }
 
-// handleWebSocket handles WebSocket connections
-func (s *Service) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := s.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("Failed to upgrade connection: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	// Add client to the list with empty subscriptions
-	s.clientsMux.Lock()
-	s.clients[conn] = make(map[string]bool)
-	s.clientsMux.Unlock()
-
-	// Remove client when done
-	defer func() {
-		s.clientsMux.Lock()
-		delete(s.clients, conn)
-		s.clientsMux.Unlock()
-	}()
-
-	// Handle incoming messages
-	for {
-		_, message, err := conn.ReadMessage()
-		if err != nil {
-			log.Printf("WebSocket read error: %v", err)
-			break
-		}
-
-		// Parse subscription message
-		var subMsg SubscriptionMessage
-		err = json.Unmarshal(message, &subMsg)
-		if err != nil {
-			log.Printf("Failed to parse subscription message: %v", err)
-			continue
-		}
-
-		// Validate message
-		if !allowEvent(subMsg.Event) {
-			log.Printf("Invalid event type in subscription message: %s", subMsg.Event)
-			continue
-		}
-
-		// Handle subscription/unsubscription for all users in whitelist
-		s.clientsMux.Lock()
-		switch subMsg.Action {
-		case "subscribe":
-			// Subscribe to all users in whitelist
-			s.clients[conn][subMsg.Event] = true
-			log.Printf("Client subscribed to %s", subMsg.Event)
-		case "unsubscribe":
-			// Unsubscribe from all users
-			delete(s.clients[conn], subMsg.Event)
-			log.Printf("Client unsubscribed %s", subMsg.Event)
-		default:
-			log.Printf("Invalid action in subscription message: %s", subMsg.Action)
-		}
-		s.clientsMux.Unlock()
-	}
-}
-
-// handleWhitelist handles whitelist management
-func (s *Service) handleWhitelist(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.whitelistMux.RLock()
-		users := make([]string, 0, len(s.whitelist))
-		for user := range s.whitelist {
-			users = append(users, user)
-		}
-		s.whitelistMux.RUnlock()
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(users)
-
-	case http.MethodPost:
-		// For simplicity, we'll just reload the whitelist file
-		err := s.loadWhitelist()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *Service) currentDirFile(msg string) (string, string, string) {
+// currentDirFile returns the current directory paths for a given event type
+func (s *Service) currentDirFile(eventType string) (string, string, string) {
 	now := time.Now().UTC()
-	// return filepath.Join(s.dataDir, msg, "hourly",
-	// 	now.Format("20060102"), fmt.Sprintf("%d", now.Hour()))
-	return filepath.Join(s.dataDir, msg, "hourly"), filepath.Join(s.dataDir, msg, "hourly", now.Format("20060102")), filepath.Join(s.dataDir, msg, "hourly", now.Format("20060102"), fmt.Sprintf("%d", now.Hour()))
+	return filepath.Join(s.config.DataDir, eventType, "hourly"),
+		filepath.Join(s.config.DataDir, eventType, "hourly", now.Format("20060102")),
+		filepath.Join(s.config.DataDir, eventType, "hourly", now.Format("20060102"), fmt.Sprintf("%d", now.Hour()))
 }
 
+// isCurrentHourFile checks if a given path is for the current hour
 func isCurrentHourFile(path string) bool {
-	// 判断给定的路径是否是当前小时的文件
+	// Determine if the given path is for the current hour
 	base := filepath.Base(path)
 	now := time.Now().UTC()
 	return strconv.Itoa(now.Hour()) == base
 }
 
-func allowEvent(msg string) bool {
-	switch msg {
-	case EventFill, EventTrade:
+// allowEvent checks if an event type is valid
+func allowEvent(event string) bool {
+	switch event {
+	case EVENT_FILL, EVENT_MISC:
 		return true
 	default:
 		return false
 	}
+}
+
+// cleanupOldEvents periodically removes old events from the database
+func (s *Service) cleanupOldEvents() {
+	defer s.wg.Done()
+
+	ticker := time.NewTicker(s.config.CleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.quit:
+			log.Println("Stopping cleanup old events")
+			return
+		case <-ticker.C:
+			// Delete events older than the retention period
+			cutoffTime := time.Now().Add(-s.config.EventRetention)
+			model.CleanUp(s.db, cutoffTime)
+		}
+	}
+}
+
+// updateFilePosition saves the current position in a file to Redis
+func (s *Service) updateFilePosition(filename string, position int64) {
+	switch filename {
+	case s.currentFillFile:
+		s.fillPosition += uint64(position)
+	case s.currentMiscFile:
+		s.miscPosition += uint64(position)
+	}
+}
+
+// saveFilePositions saves all file positions to Redis
+func (s *Service) saveFilePositions() {
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// write fills event position
+		fill := &FilePosition{
+			FilePath: s.currentFillFile,
+			Position: s.fillPosition,
+		}
+		fbyte, err := fill.Marshal()
+		if err != nil {
+			log.Printf("Failed to marshal fills event position: %v", err)
+			return
+		}
+
+		if err := wredis.WriteString(s.ctx, s.redisClient, WATCH_FILLS, string(fbyte)); err != nil {
+			log.Printf("Failed to save file position to Redis: %v", err)
+			return
+		}
+		log.Println("Saved fill position to Redis", "file", fill.FilePath, "position", fill.Position)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		misc := &FilePosition{
+			FilePath: s.currentMiscFile,
+			Position: s.miscPosition,
+		}
+
+		mbyte, err := misc.Marshal()
+		if err != nil {
+			log.Printf("Failed to marshal misc event position: %v", err)
+			return
+		}
+
+		if err := wredis.WriteString(s.ctx, s.redisClient, WATCH_MISC, string(mbyte)); err != nil {
+			log.Printf("Failed to save file position to Redis: %v", err)
+			return
+		}
+		log.Println("Saved misc position to Redis", "file", misc.FilePath, "position", misc.Position)
+	}()
+
+	wg.Wait()
+}
+
+// CatchUpEvents when the service starts, it needs to catch up with the events that were missed during the previous run.
+func (s *Service) CatchUpEvents() {
+
+	lastFIlls, err1 := wredis.ReadString(s.ctx, s.redisClient, WATCH_FILLS)
+	lastMisc, err2 := wredis.ReadString(s.ctx, s.redisClient, WATCH_MISC)
+
+	if err1 != nil || err2 != nil {
+		log.Println("Failed to read last event positions from Redis", err1, err2)
+		return
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+
+		if lastFIlls != "" {
+			f := new(FilePosition)
+			if err := f.Unmarshal([]byte(lastFIlls)); err != nil {
+				log.Println("Failed to unmarshal last fills event position")
+				return
+			}
+			log.Println("Catching up fills events", "file", f.FilePath, "position", f.Position)
+
+			if f.FilePath == s.currentFillFile {
+				s.fillPosition = f.Position
+				log.Println("Same with current file, skip catch up", "start position", f.Position)
+				return
+			}
+
+			files, err := FilesInDuration(s.config.DataDir, f.FilePath)
+			if err != nil {
+				log.Println("Failed to get files in duration")
+				return
+			}
+			s.quickProcessFills(*f, files)
+		}
+
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		if lastMisc != "" {
+			f := new(FilePosition)
+			if err := f.Unmarshal([]byte(lastMisc)); err != nil {
+				log.Println("Failed to unmarshal last fills event position")
+				return
+			}
+			log.Println("Catching up miscs events", "file", f.FilePath, "position", f.Position)
+			if f.FilePath == s.currentMiscFile {
+				s.miscPosition = f.Position
+				log.Println("Same with current file, skip catch up", "start position", f.Position)
+				return
+			}
+
+			files, err := FilesInDuration(s.config.DataDir, f.FilePath)
+			if err != nil {
+				log.Println("Failed to get files in duration")
+				return
+			}
+			s.quickProcessMiscs(*f, files)
+		}
+	}()
+
+	wg.Wait()
 }

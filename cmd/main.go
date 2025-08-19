@@ -6,22 +6,46 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	
+	"time"
+
+	config "github.com/uxuyprotocol/hyper-service/configs"
 	"github.com/uxuyprotocol/hyper-service/internal/service"
 )
 
 func main() {
 	dataDir := flag.String("data_dir", "", "Path to the data directory")
-	whitelistFile := flag.String("whitelist", "configs/whitelist.txt", "Path to the whitelist file")
 	port := flag.String("port", "8080", "Port for the WebSocket server")
+	redisAddr := flag.String("redis_addr", "localhost:6379", "Redis server address")
+	postgresAddr := flag.String("postgres_addr", "localhost:5432", "PostgreSQL server address")
+	postgresUser := flag.String("postgres_user", "postgres", "PostgreSQL user")
+	postgresPassword := flag.String("postgres_password", "postgres", "PostgreSQL password")
+	postgresDB := flag.String("postgres_db", "hyper_service", "PostgreSQL database name")
 	flag.Parse()
 
 	if *dataDir == "" {
 		log.Fatal("data_dir is required")
 	}
 
+	// Create the configuration
+	cfg := &config.Config{
+		DataDir:                *dataDir,
+		Port:                   *port,
+		RedisAddr:              *redisAddr,
+		RedisPassword:          "",
+		RedisDB:                0,
+		PostgresAddr:           *postgresAddr,
+		PostgresUser:           *postgresUser,
+		PostgresPassword:       *postgresPassword,
+		PostgresDB:             *postgresDB,
+		BloomExpectedItems:     100000000,
+		BloomFalsePositiveRate: 0.01,
+		FileCheckInterval:      5 * time.Second,
+		CleanupInterval:        7 * 24 * time.Hour,
+		EventRetention:         7 * 24 * time.Hour, // 1 week
+	}
+
 	// Create the service
-	svc, err := service.NewService(*dataDir, *whitelistFile, *port)
+	svc, err := service.NewService(cfg)
 	if err != nil {
 		log.Fatal("Failed to create service:", err)
 	}
