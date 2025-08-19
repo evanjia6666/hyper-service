@@ -31,9 +31,8 @@ func InitSchema(db *sql.DB) error {
 			data JSONB NOT NULL,
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 		);
-
-		-- Union Index useraddress, event_type, block_number
-		CREATE INDEX IF NOT EXISTS events_user_address_event_type_block_number_idx ON events (user_address, event_type, block_number);
+		-- Indexes
+		CREATE INDEX IF NOT EXISTS events_block_number_idx ON events (block_number);
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to initialize schema: %w", err)
@@ -60,9 +59,9 @@ func CleanUp(db *sql.DB, before time.Time) error {
 
 // Event represents a single trade event
 type Event struct {
-	User  string `json:"user"`
-	Event string `json:"event"`
-	Block uint64
+	User  string                 `json:"user"`
+	Event string                 `json:"event"`
+	Block uint64                 `json:"block"`
 	Data  map[string]interface{} `json:"data"`
 }
 
@@ -88,18 +87,20 @@ func InsertEvent(db *sql.DB, data []Event) error {
 	return nil
 }
 
-func QueryEventsByBlock(db *sql.DB, userAddress, event string, startBlock, endBlock uint64) ([]Event, error) {
-	// Query database
+func QueryEventsByBlock(db *sql.DB, startBlock, endBlock uint64, page, pageSize int) ([]Event, error) {
+	// Calculate offset for pagination
+	offset := (page - 1) * pageSize
+
+	// Add LIMIT and OFFSET to query for pagination support
 	rows, err := db.Query(
-		"SELECT user_address, event_type, block_number, data FROM events WHERE user_address = $1 AND event_type = $2 AND block_number >= $3 AND block_number <= $4 ORDER BY block_number",
-		userAddress, event, startBlock, endBlock)
+		"SELECT user_address, event_type, block_number, data FROM events WHERE block_number >= $1 AND block_number <= $2 ORDER BY block_number LIMIT $3 OFFSET $4",
+		startBlock, endBlock, pageSize, offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	// Collect results
-	var events []Event
+	events := []Event{}
 	for rows.Next() {
 		var userAddress, eventType string
 		var blockNumber uint64
@@ -110,21 +111,18 @@ func QueryEventsByBlock(db *sql.DB, userAddress, event string, startBlock, endBl
 			return nil, err
 		}
 
-		// Parse JSON data
 		var eventData map[string]interface{}
 		err = json.Unmarshal(data, &eventData)
 		if err != nil {
 			return nil, err
 		}
 
-		// Create result objec
-		result := Event{
+		events = append(events, Event{
 			User:  userAddress,
 			Event: eventType,
 			Block: blockNumber,
 			Data:  eventData,
-		}
-		events = append(events, result)
+		})
 	}
 	return events, nil
 }

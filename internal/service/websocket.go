@@ -106,14 +106,13 @@ func (s *Service) handleEventsQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate query parameters
-	if query.UserAddress == "" {
-		http.Error(w, "userAddress is required", http.StatusBadRequest)
+	if query.Page < 1 {
+		http.Error(w, "page must be greater than 0", http.StatusBadRequest)
 		return
 	}
 
-	if query.Event == "" {
-		http.Error(w, "event is required", http.StatusBadRequest)
+	if query.Size < 1 {
+		http.Error(w, "size must be greater than 0", http.StatusBadRequest)
 		return
 	}
 
@@ -122,7 +121,7 @@ func (s *Service) handleEventsQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	evs, err := model.QueryEventsByBlock(s.db, query.UserAddress, query.Event, query.StartBlock, query.EndBlock)
+	evs, err := model.QueryEventsByBlock(s.db, query.StartBlock, query.EndBlock, query.Page, query.Size)
 	if err != nil {
 		http.Error(w, "Failed to query events", http.StatusInternalServerError)
 		return
@@ -135,22 +134,6 @@ func (s *Service) handleEventsQuery(w http.ResponseWriter, r *http.Request) {
 // broadcastEventToSubscribers sends an event to clients subscribed to the user
 // NOTE: User has already been checked against the Bloom filter before calling this function
 func (s *Service) broadcastEventToSubscribers(event model.Event, eventType string) {
-	// s.clientsMux.RLock()
-	// defer s.clientsMux.RUnlock()
-
-	// for conn, subscriptions := range s.clients {
-	// 	// Check if this client is subscribed to this event type
-	// 	if subscribed, exists := subscriptions[eventType]; exists && subscribed {
-	// 		err := conn.WriteJSON(event)
-	// 		if err != nil {
-	// 			log.Printf("Failed to send event to client: %v", err)
-	// 			// Remove the client if there's an error
-	// 			conn.Close()
-	// 			// We can't modify s.clients here because we're holding a read lock
-	// 			// The cleanup will happen in the WebSocket handler
-	// 		}
-	// 	}
-	// }
 	s.websocketMsgChan <- &EventDetail{
 		Data:  event,
 		Event: eventType,

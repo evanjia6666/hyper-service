@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 -- Union Index useraddress, event_type, block_number
-CREATE INDEX IF NOT EXISTS events_user_address_event_type_block_number_idx ON events (user_address, event_type, block_number);
+CREATE INDEX IF NOT EXISTS events_block_number_idx ON events (block_number);
 
 -- Query to delete old events (older than 1 week)
 -- This should be run periodically as a maintenance task

@@ -62,10 +62,12 @@ type LedgerUpdate struct {
 
 // EventQuery represents the parameters for querying events
 type EventQuery struct {
-	UserAddress string `json:"userAddress"`
-	Event       string `json:"event"`
-	StartBlock  uint64 `json:"startBlock"`
-	EndBlock    uint64 `json:"endBlock"`
+	// UserAddress string `json:"userAddress"`
+	// Event       string `json:"event"`
+	StartBlock uint64 `json:"startBlock"`
+	EndBlock   uint64 `json:"endBlock"`
+	Page       int    `json:"page"`
+	Size       int    `json:"pageSize"`
 }
 
 // Service represents our main service

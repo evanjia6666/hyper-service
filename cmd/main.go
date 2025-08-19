@@ -16,6 +16,8 @@ func main() {
 	dataDir := flag.String("data_dir", "", "Path to the data directory")
 	port := flag.String("port", "8080", "Port for the WebSocket server")
 	redisAddr := flag.String("redis_addr", "localhost:6379", "Redis server address")
+	redisPassword := flag.String("redis_password", "", "Redis password")
+	redisDB := flag.Int("redis_db", 0, "Redis database number")
 	postgresAddr := flag.String("postgres_addr", "localhost:5432", "PostgreSQL server address")
 	postgresUser := flag.String("postgres_user", "postgres", "PostgreSQL user")
 	postgresPassword := flag.String("postgres_password", "postgres", "PostgreSQL password")
@@ -31,8 +33,8 @@ func main() {
 		DataDir:                *dataDir,
 		Port:                   *port,
 		RedisAddr:              *redisAddr,
-		RedisPassword:          "",
-		RedisDB:                0,
+		RedisPassword:          *redisPassword,
+		RedisDB:                *redisDB,
 		PostgresAddr:           *postgresAddr,
 		PostgresUser:           *postgresUser,
 		PostgresPassword:       *postgresPassword,
@@ -40,7 +42,7 @@ func main() {
 		BloomExpectedItems:     100000000,
 		BloomFalsePositiveRate: 0.01,
 		FileCheckInterval:      5 * time.Second,
-		CleanupInterval:        7 * 24 * time.Hour,
+		CleanupInterval:        1 * time.Hour,
 		EventRetention:         7 * 24 * time.Hour, // 1 week
 	}
 
