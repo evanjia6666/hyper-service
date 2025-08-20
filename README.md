@@ -10,7 +10,7 @@ A Go service that monitors hypervisor node data files and provides real-time Web
 - Automatic hourly file switching
 - PostgreSQL storage for event data with time-based cleanup (1 week retention)
 - Redis integration for Bloom filter initialization and file position tracking
-- API for querying events by user address, event type, and block range
+- API for querying events by block range
 - Docker Compose setup with Redis, PostgreSQL, and Adminer web UI
 
 ## Prerequisites
