@@ -8,6 +8,7 @@ services:
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
+    restart: on-failure:5
 
   postgres:
     image: postgres:15-alpine
@@ -24,6 +25,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: on-failure:5
 
   postgres-webui:
     image: adminer
@@ -50,6 +52,7 @@ services:
     volumes:
       - ./test:/app/test
     command: ["-data_dir=/app/test"]
+    restart: on-failure:5
 
 volumes:
   redis_data:
