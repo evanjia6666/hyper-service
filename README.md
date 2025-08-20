@@ -44,7 +44,7 @@ go mod tidy
 ### Running the Service Directly
 
 ```bash
-go run cmd/main.go -data_dir=/path/to/data -whitelist=configs/whitelist.txt -port=8080
+go run cmd/main.go -data_dir=/path/to/data -port=8080
 ```
 
 Parameters:
