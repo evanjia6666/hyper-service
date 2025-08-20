@@ -20,6 +20,7 @@ func (s *Service) startWebSocketServer() {
 
 	http.HandleFunc("/ws", s.handleWebSocket)
 	http.HandleFunc("/events", s.handleEventsQuery) // New endpoint for querying events
+	http.HandleFunc("/height", s.handleblockheight)
 
 	log.Printf("WebSocket server starting on port %s", s.config.Port)
 	err := http.ListenAndServe(":"+s.config.Port, nil)
@@ -129,6 +130,20 @@ func (s *Service) handleEventsQuery(w http.ResponseWriter, r *http.Request) {
 	// Return results
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(evs)
+}
+
+// hadndleblockheight handles block height querying
+func (s *Service) handleblockheight(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Get the latest block height from the service
+	block := s.currentBlockHeight.Load()
+
+	// Return the latest block height
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int64{"block": block})
 }
 
 // broadcastEventToSubscribers sends an event to clients subscribed to the user

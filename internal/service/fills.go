@@ -75,6 +75,8 @@ func (s *Service) processFillsFile() {
 			continue
 		}
 
+		s.currentBlockHeight.Store(data.BlockNum)
+
 		for _, event := range data.Events {
 			if len(event) < 2 {
 				continue

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync/atomic"
 
 	"os"
 	"path/filepath"
@@ -101,6 +102,8 @@ type Service struct {
 	miscPosition    uint64
 
 	wg sync.WaitGroup
+
+	currentBlockHeight atomic.Int64
 }
 
 // NewService creates a new service instance
