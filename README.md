@@ -36,7 +36,7 @@ go mod tidy
 
 2. The services will be available at:
    - Hyper Service WebSocket: `ws://localhost:8080/ws`
-   - Hyper Service HTTP API: `http://localhost:8000`
+   - Hyper Service HTTP API: `http://localhost:8080`
    - PostgreSQL Adminer UI: `http://localhost:8081`
    - Redis: `localhost:6379`
    - PostgreSQL: `localhost:5432`
@@ -49,9 +49,10 @@ go run cmd/main.go -data_dir=/path/to/data -whitelist=configs/whitelist.txt -por
 
 Parameters:
 - `data_dir`: Path to the directory containing node data files
-- `whitelist`: Path to the whitelist file (default: configs/whitelist.txt)
-- `port`: Port for the WebSocket server (default: 8000)
+- `port`: Port for the WebSocket server (default: 8080)
 - `redis_addr`: Redis server address (default: localhost:6379)
+- `redis_pasword` Redis server password (default: "")
+- `redis_db`: Redis database number (default: 0)
 - `postgres_addr`: PostgreSQL server address (default: localhost:5432)
 - `postgres_user`: PostgreSQL user (default: postgres)
 - `postgres_password`: PostgreSQL password (default: postgres)
@@ -93,7 +94,6 @@ The WebSocket server supports subscription management:
 
 ### HTTP Endpoints
 
-- Whitelist management: `http://localhost:8080/whitelist` (GET to retrieve, POST to reload)
 - Event query API: `http://localhost:8080/events` (POST with JSON query)
 
 Event query example:
@@ -101,10 +101,10 @@ Event query example:
 curl -X POST http://localhost:8080/events \
   -H "Content-Type: application/json" \
   -d '{
-    "userAddress": "0x348e5365acfa48a26ada7da840ca611e29c950ef",
-    "event": "fill",
     "startBlock": 696372899,
-    "endBlock": 696374333
+    "endBlock": 696374333,
+    "page": 1,
+    "pageSize": 10
   }'
 ```
 
@@ -116,11 +116,11 @@ curl -X POST http://localhost:8080/events \
 │   └── main.go          # Main application entry point
 ├── configs/
 │   ├── config.go        # Configuration structure
-│   └── whitelist.txt    # Whitelisted user addresses
 ├── internal/
 │   └── service/
 │       ├── service.go   # Core service implementation
-│       └── schema.sql   # PostgreSQL schema
+|-- migrations/
+|   ├── schema.sql
 ├── scripts/
 │   ├── generate_test_data.sh  # Test data generator
 │   └── test_client.html       # WebSocket test client
@@ -131,9 +131,6 @@ curl -X POST http://localhost:8080/events \
 └── README.md            # This file
 ```
 
-## Development
-
-To modify the whitelist, edit `configs/whitelist.txt` and either restart the service or POST to the `/whitelist` endpoint to reload it.
 
 ## Implementation Notes
 
